@@ -2,7 +2,6 @@ require('dotenv').config();
 require('express-async-errors');
 
 const express = require('express');
-const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -13,10 +12,8 @@ const swaggerUi = require('swagger-ui-express');
 
 const connectDB = require('./config/database');
 const logger = require('./utils/logger');
-const initSocket = require('./config/socket');
 const swaggerSpec = require('./config/swagger');
 const errorHandler = require('./middleware/errorHandler');
-const { scheduleKHQRExpiry } = require('./jobs/khqrExpiry');
 
 // Routes
 const authRoutes = require('./routes/auth.routes');
@@ -31,10 +28,8 @@ const adminRoutes = require('./routes/admin.routes');
 const wishlistRoutes = require('./routes/wishlist.routes');
 
 const app = express();
-const server = http.createServer(app);
-const io = initSocket(server);
-app.set('io', io);
 
+// Connect to MongoDB (cached for serverless)
 connectDB();
 
 // Security
@@ -46,28 +41,43 @@ const limiter = rateLimit({
   max: parseInt(process.env.RATE_LIMIT_MAX || '100'),
   message: { success: false, message: 'Too many requests' }
 });
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { success: false, message: 'Too many auth attempts' } });
-
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { success: false, message: 'Too many auth attempts' }
+});
 app.use('/api/', limiter);
 app.use('/api/auth/', authLimiter);
 
 // CORS
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:4200').split(',').map(s => s.trim());
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:4200',
+  origin: (origin, cb) => {
+    if (!origin || allowedOrigins.some(o => origin.startsWith(o))) return cb(null, true);
+    cb(new Error('Not allowed by CORS'));
+  },
   credentials: true,
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
-app.use(morgan('combined', { stream: { write: m => logger.info(m.trim()) } }));
 
-// Static uploads
+// Logging (skip in serverless to reduce noise)
+if (process.env.NODE_ENV !== 'production') {
+  app.use(morgan('dev'));
+}
+
+// Static uploads (only works on traditional server, not Vercel)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Swagger docs
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, { explorer: true }));
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  explorer: true,
+  customCss: '.swagger-ui .topbar { display: none }',
+  customSiteTitle: 'KhmerShop API Docs'
+}));
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -82,18 +92,48 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/wishlist', wishlistRoutes);
 
 // Health check
-app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date(), version: '1.0.0' }));
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date(), env: process.env.NODE_ENV, version: '1.0.0' });
+});
+
+// Root
+app.get('/', (req, res) => {
+  res.json({ message: '🛍️ KhmerShop API', docs: '/api/docs', health: '/api/health' });
+});
 
 // Error handler
 app.use(errorHandler);
 
-// Schedule jobs
-scheduleKHQRExpiry();
+// ─── Start server (only when NOT on Vercel) ───────────────────────────────────
+const isVercel = process.env.VERCEL || process.env.NOW_REGION;
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  logger.info(`🛍️  KhmerShop API running on port ${PORT}`);
-  logger.info(`📖 Swagger docs: http://localhost:${PORT}/api/docs`);
-});
+if (!isVercel) {
+  const http = require('http');
+  const server = http.createServer(app);
 
-module.exports = { app, io };
+  // Socket.io (only in traditional server mode)
+  try {
+    const initSocket = require('./config/socket');
+    const io = initSocket(server);
+    app.set('io', io);
+  } catch (e) {
+    logger.warn('Socket.io init skipped');
+  }
+
+  // KHQR expiry cron (only in traditional server mode)
+  try {
+    const { scheduleKHQRExpiry } = require('./jobs/khqrExpiry');
+    scheduleKHQRExpiry();
+  } catch (e) {
+    logger.warn('KHQR cron skipped');
+  }
+
+  const PORT = process.env.PORT || 5000;
+  server.listen(PORT, () => {
+    logger.info(`🚀 KhmerShop API running on port ${PORT}`);
+    logger.info(`📖 Swagger: http://localhost:${PORT}/api/docs`);
+  });
+}
+
+// Export for Vercel serverless
+module.exports = app;

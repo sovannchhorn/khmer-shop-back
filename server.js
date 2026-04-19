@@ -8,8 +8,6 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const swaggerUi = require('swagger-ui-express');
-
 const connectDB = require('./config/database');
 const logger = require('./utils/logger');
 const swaggerSpec = require('./config/swagger');
@@ -72,12 +70,37 @@ if (process.env.NODE_ENV !== 'production') {
 // Static uploads (only works on traditional server, not Vercel)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Swagger docs
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  explorer: true,
-  customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'KhmerShop API Docs'
-}));
+// Swagger docs — CDN-based (fast, no heavy node_modules serving)
+app.get('/api/docs', (req, res) => {
+  const spec = JSON.stringify(swaggerSpec);
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <title>KhmerShop API Docs</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>body{margin:0} .topbar{display:none!important}</style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      spec: ${spec},
+      dom_id: '#swagger-ui',
+      deepLinking: true,
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: 'BaseLayout'
+    });
+  </script>
+</body>
+</html>`);
+});
+
+// Swagger JSON spec endpoint
+app.get('/api/docs.json', (req, res) => res.json(swaggerSpec));
 
 // API Routes
 app.use('/api/auth', authRoutes);
